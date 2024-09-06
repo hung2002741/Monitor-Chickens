@@ -12,7 +12,7 @@ if not vcap.isOpened():
     exit()
 
 # Directory to save frames
-output_dir = 'C:/Users/ADMIN/OneDrive/Desktop/OJT/captured_frames'
+output_dir = 'C:/Users/ADMIN/OneDrive/Desktop/OJT/BBox-Label-Tool/Images'
 os.makedirs(output_dir, exist_ok=True)
 
 frame_count = 0
