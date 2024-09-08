@@ -20,7 +20,7 @@ LabelTool
 
 Environment
 ----------
-- python 2.7
+- python 3
 - python PIL (Pillow)
 
 Run
