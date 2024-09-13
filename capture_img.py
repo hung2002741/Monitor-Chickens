@@ -13,7 +13,7 @@ if not vcap.isOpened():
     exit()
 
 # Directory to save frames
-output_dir = 'C:/Users/ADMIN/OneDrive/Desktop/OJT/BBox-Label-Tool/Images'
+output_dir = r'D:/Monitor-Chickens/Images'
 os.makedirs(output_dir, exist_ok=True)
 
 # Function to extract frame number from filename
