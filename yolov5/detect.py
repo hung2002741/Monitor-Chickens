@@ -162,7 +162,6 @@ def run(
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / "labels" if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
-
     # Load model
     device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
@@ -243,14 +242,19 @@ def run(
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+
+
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
-
+                
                 # Print results
                 for c in det[:, 5].unique():
                     n = (det[:, 5] == c).sum()  # detections per class
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                    label_count_text = f"{n} {names[int(c)]}{'s' * (n > 1)}"
+
+                    cv2.putText(im0, label_count_text, (20, 50 + int(c)*30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
@@ -279,7 +283,7 @@ def run(
                         annotator.box_label(xyxy, label, color=colors(c, True))
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / "crops" / names[c] / f"{p.stem}.jpg", BGR=True)
-
+            
             # Stream results
             im0 = annotator.result()
             if view_img:
@@ -289,7 +293,7 @@ def run(
                     cv2.resizeWindow(str(p), im0.shape[1], im0.shape[0])
                 cv2.imshow(str(p), im0)
                 cv2.waitKey(1)  # 1 millisecond
-
+                
             # Save results (image with detections)
             if save_img:
                 if dataset.mode == "image":
@@ -395,8 +399,8 @@ def parse_opt():
     parser.add_argument("--project", default=ROOT / "runs/detect", help="save results to project/name")
     parser.add_argument("--name", default="exp", help="save results to project/name")
     parser.add_argument("--exist-ok", action="store_true", help="existing project/name ok, do not increment")
-    parser.add_argument("--line-thickness", default=3, type=int, help="bounding box thickness (pixels)")
-    parser.add_argument("--hide-labels", default=False, action="store_true", help="hide labels")
+    parser.add_argument("--line-thickness", default=2, type=int, help="bounding box thickness (pixels)")
+    parser.add_argument("--hide-labels", default=True, action="store_true", help="hide labels")
     parser.add_argument("--hide-conf", default=False, action="store_true", help="hide confidences")
     parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
