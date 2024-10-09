@@ -9,18 +9,8 @@ import email.utils
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from dotenv import load_dotenv
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import cv2
-from PIL import Image, ImageTk
-import subprocess
-import threading
-import os
-import pathlib
-import json 
-from ultralytics import YOLO
-temp = pathlib.PosixPath
-pathlib.PosixPath = pathlib.WindowsPath
+import shutil
+import numpy as
 
 # Load environment variables
 load_dotenv()
@@ -39,10 +29,11 @@ class VideoUploadHandler(FileSystemEventHandler):
         if event.is_directory:
             return None
         # Only upload m3u8 + ts files
-        if not event.src_path.endswith(".m3u8") and not event.src_path.endswith(".ts"):
+        if not event.src_path.endswith("final_output.m3u8") and not event.src_path.endswith(".ts"):
             return None
         # Upload the new video
         self.upload_video(event.src_path)
+
     # def on_moved(self, event: DirMovedEvent | FileMovedEvent) -> None:
     #     return super().on_moved(event)
 
@@ -51,9 +42,6 @@ class VideoUploadHandler(FileSystemEventHandler):
 
         farmId = folders[-2]
         channelId = folders[-1][-1]
-        print(videoFilePath)
-        print(farmId)
-        print(channelId)
         # penId = self.repository.get("penId", None)  # penId is optional
 
         # Read the video file as binary
@@ -90,7 +78,7 @@ class VideoUploadHandler(FileSystemEventHandler):
         }
 
         # Check if the file is a .m3u8 or .ts file and set the upload accordingly
-        if videoFilePath.endswith(".m3u8"):
+        if videoFilePath.endswith("final_output.m3u8"):
             print(f"Uploading .m3u8 file: {videoFilePath}")
             post_request(post_url, get_file(videoFilePath), headers=headers)
         elif videoFilePath.endswith(".ts"):
@@ -169,6 +157,20 @@ def get_rfc1123_date():
     rfc1123_date = email.utils.formatdate(timeval=now.timestamp(), usegmt=True)
     print(rfc1123_date)
     return rfc1123_date
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import cv2
+from PIL import Image, ImageTk
+import subprocess
+import threading
+import os
+import torch
+import pathlib
+import json 
+from ultralytics import YOLO
+temp = pathlib.PosixPath
+pathlib.PosixPath = pathlib.WindowsPath
+
 
 with open('response1.json', 'r', encoding='utf-8') as f:
     json_data = json.load(f)
@@ -236,7 +238,7 @@ class RTSPManager(tk.Tk):
         self.create_api_bar()
         self.create_video_frame()
         
-        self.model_path = 'E:/kaggle_weight_chicken/yolov8_best.pt'
+        self.model_path = 'E:/kaggle_weight_chicken/v8_aug_best.pt'
         self.model = YOLO(self.model_path)
         load_dotenv()
 
@@ -275,7 +277,8 @@ class RTSPManager(tk.Tk):
             threads.append(thread)
 
         for thread in threads:
-            thread.join()
+            # thread.join()
+            self.threads = threads  # Store threads to manage them later if needed
 
     def upload_files_to_server(self):
         directories = []
@@ -433,8 +436,47 @@ class RTSPManager(tk.Tk):
             self.threads[rtsp_link] = threading.Thread(target=self.record_stream, args=(rtsp_link,), daemon=True)
             self.threads[rtsp_link].start()
 
-    def record_stream(self, rtsp_link):
+    # Function to compute brightness of the frame
+    def calculate_brightness(self, frame):
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)  # Convert frame to HSV color space
+        brightness = np.mean(hsv[:, :, 2])  # Mean of the V (value) channel in HSV represents brightness
+        return brightness
+
+    # Adjust brightness if needed
+    def adjust_brightness(self,frame, target_brightness=150, threshold=40):
+        current_brightness = self.calculate_brightness(frame)
+        
+        if current_brightness < target_brightness - threshold:  # If frame is too dark
+            factor = target_brightness / current_brightness
+            frame = cv2.convertScaleAbs(frame, alpha=factor, beta=0)  # Brighten the image
+            print("brightness increased")
+        elif current_brightness > target_brightness + threshold:  # If frame is too bright
+            factor = target_brightness / current_brightness
+            frame = cv2.convertScaleAbs(frame, alpha=factor, beta=0)  # Darken the image
+            print("brightness decreased")
+
+
+        return frame
     
+    def calculate_area_in_image(self, bbox):
+        x1, y1, x2, y2 = bbox
+        width = x2 - x1
+        height = y2 - y1
+        area = width * height
+        return area
+    
+    # Hàm tính kích thước thật dựa trên khoảng cách và tiêu cự
+    def calculate_real_size(self, area_in_image, distance_to_chicken, focal_length):
+        real_size = area_in_image * (distance_to_chicken / focal_length)
+        return real_size
+
+    # Hàm ước tính cân nặng của gà
+    def estimate_weight(self, real_size, factor, k=0.05, alpha=1.5):
+        weight = k * (real_size ** alpha) * factor
+        return weight
+    
+    def record_stream(self, rtsp_link):
+
         if rtsp_link not in self.video_capture or not self.video_capture[rtsp_link].isOpened():
             self.video_capture[rtsp_link] = cv2.VideoCapture(rtsp_link)
 
@@ -457,61 +499,119 @@ class RTSPManager(tk.Tk):
             target_fps = 10
             skip_frames = int(actual_fps / target_fps) if actual_fps > target_fps else 1
 
-            m3u8_path = os.path.join(output_dir, 'output.m3u8')
+            m3u8_path = os.path.join(output_dir, f'{channel_id}_output.m3u8')
 
             # FFmpeg command for HLS
             base_url = f"ai/stream_pens/{farm_id}/{camera_id}/{channel_id[-1]}/"
 
-            # FFmpeg command for HLS with hls_base_url
             ffmpeg_command = [
-            'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo', '-pix_fmt', 'bgr24',
-            '-s', '1920x1080', '-r', str(target_fps), '-i', '-', '-c:v', 'libx264',
-            '-crf', '28',  # Use CRF to control quality
-            '-b:v', '500k',  # Set bitrate to control file size
-            '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-tune', 'zerolatency',
-            '-f', 'hls', '-hls_time', "5", '-hls_list_size', '0', '-hls_flags', 'delete_segments',
-            '-hls_base_url', base_url, 
-            m3u8_path
-            #str(self.hls_time)
-                ]
-            
+                'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo', '-pix_fmt', 'bgr24',
+                '-s', '1920x1080', '-r', str(target_fps), '-i', '-', '-c:v', 'libx264',
+                '-crf', '31',  # Use CRF to control quality
+                '-b:v', '500k',  # Set bitrate to control file size
+                '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-tune', 'zerolatency',
+                '-f', 'hls', '-hls_time', str(self.hls_time), '-hls_list_size', '0', '-hls_flags', 'delete_segments',
+                '-hls_base_url', base_url, 
+                m3u8_path
+            ]
+
             process = subprocess.Popen(ffmpeg_command, stdin=subprocess.PIPE)
             self.recording[rtsp_link] = True
             print(f"Recording started for {rtsp_link}")
 
             frame_count = 0
 
+            # Focal length and resize factor
+            focal_length = 35  # Example focal length
+            resize_factor = 0.5
+            weights = []  # To store the weight estimations
+            height_part = None  # We'll set this later once the frame size is known
+
             while self.recording.get(rtsp_link, False) and not self.stop_flag:
                 ret, frame = self.video_capture[rtsp_link].read()
                 if not ret:
                     break
+                
+                # Initialize frame height and set height parts for calculating distance
+                if height_part is None:
+                    frame_height, frame_width = frame.shape[:2]
+                    height_part = frame_height // 4
 
                 # Skip frames to match the target FPS
                 frame_count += 1
                 if frame_count % skip_frames != 0:
                     continue
 
+                # Adjust brightness
+                frame = self.adjust_brightness(frame)
+
                 # Apply YOLOv8 processing on GPU
                 try:
                     results = self.model(frame, verbose=False)  # YOLOv8 model processing (runs on GPU)
                     num_boxes = len(results[0].boxes)
 
-                    # Annotate frames with bounding boxes and object counts
+                    # Annotate frames with bounding boxes, object counts, and estimate weights
                     cv2.putText(frame, f'So luong ga: {num_boxes}', (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
                     for box in results[0].boxes:
                         x1, y1, x2, y2 = map(int, box.xyxy[0])  # Bounding box coordinates
                         conf = box.conf.item()  # Confidence score
                         cls = int(box.cls.item())  # Class ID
                         if conf > 0.25:  # Only annotate boxes with confidence > 0.25
-                            label = f"{self.model.names[cls]} {conf:.2f}"
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+                            # Calculate the area in the image (bounding box area)
+                            area_in_image = self.calculate_area_in_image((x1, y1, x2, y2))
+
+                            # Determine the distance factor based on the position in the frame
+                            if y2 <= height_part:
+                                factor = 2
+                            elif y2 <= height_part * 2:
+                                factor = 1.7
+                            elif y2 <= height_part * 3:
+                                factor = 1.3
+                            else:
+                                factor = 1
+
+                            # Estimate the real size and weight of the chicken
+                            distance_to_chicken = 2  # Assumed distance
+                            real_size = self.calculate_real_size(area_in_image, distance_to_chicken, focal_length)
+                            estimated_weight = self.estimate_weight(real_size, factor)
+
+                            # Draw the weight on the frame
+                            cv2.putText(frame, f'Weight: {estimated_weight:.2f}g', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
+
+                            # Store the estimated weight
+                            weights.append(estimated_weight)
+
+                    # Calculate and display the average weight
+                    if weights:
+                        avg_weight = np.mean(weights)
+                        cv2.putText(frame, f'Avg Weight: {avg_weight:.2f}g', (10, frame_height - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+
+                        # Resize frame before displaying
+                        # frame = cv2.resize(frame, (int(frame_width * resize_factor), int(frame_height * resize_factor)))
 
                     # Write the processed frame to FFmpeg for saving
                     process.stdin.write(frame.tobytes())
 
                 except Exception as e:
                     print(f"Error in YOLOv8 processing for {rtsp_link}: {e}")
+
+            m3u8_files = [f for f in os.listdir(output_dir) if f.endswith('.m3u8')]
+            if not m3u8_files:
+                print("No .m3u8 files found in the folder.")
+                return
+            
+            last_file = m3u8_files[-1]
+            
+            # Set the destination file name
+            source_path = os.path.join(output_dir, last_file)
+            destination_path = os.path.join(output_dir, f'{channel_id}_final_output.m3u8')
+            
+            # Copy the last file and rename it
+            shutil.copy2(source_path, destination_path)
+            print(f"Copied and renamed {last_file} to final_output.m3u8")
 
             self.video_capture[rtsp_link].release()
             process.stdin.close()
@@ -523,16 +623,14 @@ class RTSPManager(tk.Tk):
             print(f"Stopped recording for {rtsp_link}.")
 
     def reset_farms(self):
-        for link in self.current_rtsp_links:
-            rtsp_link = link["rtsp"]  # Extract the RTSP URL from the dictionary
-            self.stop_video_stream(rtsp_link)
-            self.stop_recording(rtsp_link)
-
         self.current_rtsp_links = []
-        
-        # Destroy all video widgets in the frame to reset the display
-        for widget in self.video_frame.winfo_children():
-            widget.destroy()
+        for rtsp in list(self.video_capture.keys()):
+            self.stop_video_stream(rtsp)
+        for rtsp in list(self.recording.keys()):
+            self.stop_recording(rtsp)
+        self.video_label.clear()
+        self.video_frame.destroy()
+        self.create_video_frame()  # Tạo lại khung videoe
 
 if __name__ == "__main__":
 
