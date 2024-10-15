@@ -7,10 +7,11 @@ import base64
 from datetime import datetime, timezone
 import email.utils
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from watchdog.events import DirDeletedEvent, FileDeletedEvent, FileSystemEventHandler
 from dotenv import load_dotenv
+import threading    
 import shutil
-import numpy as
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -20,37 +21,39 @@ HMAC_KEY = os.getenv("HMAC_KEY")
 STREAM_FARM_ENDPOINT = os.getenv("STREAM_FARM_ENDPOINT")
 STREAM_PEN_ENDPOINT = os.getenv("STREAM_PEN_ENDPOINT")
 
+
 class VideoUploadHandler(FileSystemEventHandler):
-    def __init__(self, repository : dict):
+    def __init__(self, repository : str):
         self.repository = repository
 
     def on_created(self, event):
-        print(f"New video detected: {event.src_path}")
+        print(f"New file detected: {event.src_path}")
         if event.is_directory:
             return None
-        # Only upload m3u8 + ts files
-        if not event.src_path.endswith("final_output.m3u8") and not event.src_path.endswith(".ts"):
-            return None
-        # Upload the new video
-        self.upload_video(event.src_path)
+        # Chỉ tải lên các tệp m3u8 và ts
+        if event.src_path.endswith(".ts") or event.src_path.endswith("final_output.m3u8"):
+            self.upload_video(event.src_path)
 
-    # def on_moved(self, event: DirMovedEvent | FileMovedEvent) -> None:
-    #     return super().on_moved(event)
 
     def upload_video(self, videoFilePath):
-        folders = self.repository.split('/')
+        # videoFilePath = videoFilePath.replace("\\", "/")
+        print(videoFilePath)
+        print(self.repository)
 
-        farmId = folders[-2]
-        channelId = folders[-1][-1]
-        # penId = self.repository.get("penId", None)  # penId is optional
+        result = self.repository.split("recorded/")[1]
+        folders = result.split('/')
+        print(folders)
+        if len(folders) == 3:
+            penId = folders[-2]
+            channelId = folders[-1][-1]
+            farmId = folders[-3]
+        else:
+            farmId = folders[-2]
+            channelId = folders[-1][-1]
+            penId = None
 
         # Read the video file as binary
         content = read_file(videoFilePath)
-
-        # Ensure content is not None
-        if content is None:
-            print(f"Error reading file: {videoFilePath}")
-            return
 
         # Compute the content hash
         contentHash = compute_content_hash(content)
@@ -65,8 +68,8 @@ class VideoUploadHandler(FileSystemEventHandler):
         signature = generate_signature(HMAC_KEY, dataToSign)
 
         # Create the API URL
-        if None:
-            post_url = f"{STREAM_PEN_ENDPOINT}/{farmId}/{channelId}/{penId}"
+        if penId:
+            post_url = f"{STREAM_PEN_ENDPOINT}/{farmId}/{penId}/{channelId}"
         else:
             post_url = f"{STREAM_FARM_ENDPOINT}/{farmId}/{channelId}"
 
@@ -77,17 +80,19 @@ class VideoUploadHandler(FileSystemEventHandler):
             'x-ms-content-sha256': contentHash,
         }
 
-        # Check if the file is a .m3u8 or .ts file and set the upload accordingly
-        if videoFilePath.endswith("final_output.m3u8"):
-            print(f"Uploading .m3u8 file: {videoFilePath}")
-            post_request(post_url, get_file(videoFilePath), headers=headers)
-        elif videoFilePath.endswith(".ts"):
-            print(f"Uploading .ts file: {videoFilePath}")
-            post_request(post_url, get_file(videoFilePath), headers=headers)
-        else:
-            print("Unsupported file format.")
+        # Send a POST request to upload the video
+        print(f"Uploading video for camera: farmId={farmId}, penId={penId}, channelId={channelId}, videoFile={videoFilePath}")
+        print(f"Post URL: {post_url}")
+        post_request(post_url, get_file(videoFilePath), headers=headers)
 
-def monitor_folder(repository : str):
+def generate_signature(secret_key, data):
+    key = bytes(secret_key, 'utf-8')  # Chuyển đổi secret_key thành bytes
+    message = bytes(data, 'utf-8')    # Chuyển đổi data thành bytes
+    hmac_sha256 = hmac.new(key, message, hashlib.sha256)
+    signature = base64.b64encode(hmac_sha256.digest()).decode('utf-8')
+    return signature
+
+def monitor_folder(repository):
     print(f"Monitoring folder: {repository}")
     event_handler = VideoUploadHandler(repository)
     observer = Observer()
@@ -95,20 +100,28 @@ def monitor_folder(repository : str):
     observer.start()
     try:
         while True:
-            time.sleep(1)
+            time.sleep(3)
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
 
+def start_monitoring(camera_configs):
+    threads = []
+    for config in camera_configs:
+        # Tạo một luồng mới cho mỗi camera config
+        thread = threading.Thread(target=monitor_folder, args=(config,))
+        thread.start()
+        threads.append(thread)
+
+    # Đợi tất cả các luồng kết thúc
+    for thread in threads:
+        thread.join()
 # sending a POST request
 def post_request(url, files=None, json=None, headers=None):
-    if files is None:
-        print(f"No files to upload for {url}")
-        return
     response = requests.post(url=url, files=files, headers=headers, json=json, verify=True)
     if response.status_code != 200:
         print(f"Request failed with status code {response.status_code}")
-        print(response.text)
+        print(f"Response text: {response.text}")  # In ra nội dung phản hồi từ máy chủ
         return None
     else:
         print(response.status_code)
@@ -116,12 +129,13 @@ def post_request(url, files=None, json=None, headers=None):
 
 def compute_content_hash(content):
     sha256 = hashlib.sha256()
-    # check if content is already in bytes
+    # Kiểm tra xem content có phải là bytes không
     if isinstance(content, str):
-        content = bytes(content, 'utf-8')
+        content = content.encode('utf-8')  # Chuyển đổi chuỗi thành bytes nếu cần
     sha256.update(content)
     hashed_content = base64.b64encode(sha256.digest()).decode('utf-8')
     return hashed_content
+
 
 def generate_signature(secret_key, data):
     key = bytes(secret_key, 'utf-8')
@@ -132,7 +146,7 @@ def generate_signature(secret_key, data):
 
 def read_file(file_path):
     try:
-        with open(file_path, 'rb') as file:
+        with open(file_path, 'rb') as file:  # Đảm bảo đọc tệp dưới dạng bytes (rb)
             content = file.read()
             return content
     except FileNotFoundError:
@@ -157,6 +171,7 @@ def get_rfc1123_date():
     rfc1123_date = email.utils.formatdate(timeval=now.timestamp(), usegmt=True)
     print(rfc1123_date)
     return rfc1123_date
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import cv2
@@ -172,38 +187,41 @@ temp = pathlib.PosixPath
 pathlib.PosixPath = pathlib.WindowsPath
 
 
-with open('response1.json', 'r', encoding='utf-8') as f:
+with open('response.json', 'r', encoding='utf-8') as f:
     json_data = json.load(f)
 
 # Extract the camera information from the JSON data
-def load_rtsp_links():
+def load_rtsp_links(json_data):
     rtsp_links = []
 
-    # Extract farm information from streams_farms_response
-    farm_data = json_data[1]['streams_farms_response']['items'][0]
-    farm_id = farm_data['id']
+    # Extract farm information from farm_response
+    farms = json_data[0]['farm_response']['items']
 
-    # Extract camera information from camera_response
-    cameras = json_data[2]['camera_response']['cameras']
-    pen_cameras = json_data[2]['camera_response']['penCameras']
+    # Loop through each farm to get farm ID
+    for farm in farms:
+        farm_id = farm['id']
 
-    # Add cameras to rtsp_links
-    for camera in cameras:
-        rtsp_links.append({
-            "farmID": farm_id, 
-            "cameraID": camera['id'],  # Add cameraID here
-            "channelID": f"Channel{camera['channelId']}", 
-            "rtsp": camera['url']
-        })
+        # Extract camera information from camera_response
+        cameras = json_data[1]['camera_response']['cameras']
+        pen_cameras = json_data[1]['camera_response']['penCameras']
 
-    # Add pen cameras to rtsp_links
-    for pen_camera in pen_cameras:
-        rtsp_links.append({
-            "farmID": pen_camera['farmId'], 
-            "cameraID": pen_camera['id'],  # Add cameraID here
-            "channelID": f"Channel{pen_camera['channelId']}", 
-            "rtsp": pen_camera['cameraUrl']
-        })
+        # Add cameras to rtsp_links
+        for camera in cameras:
+            rtsp_links.append({
+                "farmID": farm_id,
+                "cameraID": camera['id'],  # Add cameraID here
+                "channelID": f"Channel{camera['channelId']}",
+                "rtsp": camera['url']
+            })
+
+        # Add pen cameras to rtsp_links
+        for pen_camera in pen_cameras:
+            rtsp_links.append({
+                "farmID": pen_camera['farmId'],
+                "penID": pen_camera['PenId'],  # Update to PenId
+                "channelID": f"Channel{pen_camera['channelId']}",
+                "rtsp": pen_camera['cameraUrl']
+            })
 
     return rtsp_links
 
@@ -223,13 +241,13 @@ class RTSPManager(tk.Tk):
         self.title("RTSP Stream Management")
         self.geometry(f"{self.window_width}x{self.window_height}")
 
-        self.rtsp_links = load_rtsp_links()
+        self.rtsp_links = load_rtsp_links(json_data)
 
         self.current_rtsp_links = []
         self.video_capture = {}
         self.video_label = {}
         self.recording = {}
-        self.stop_flag = False
+        self.stop_flags = {}
         self.review_mode = {}
         self.video_writer = {}
         self.processes = {}
@@ -240,6 +258,7 @@ class RTSPManager(tk.Tk):
         
         self.model_path = 'E:/kaggle_weight_chicken/v8_aug_best.pt'
         self.model = YOLO(self.model_path)
+
         load_dotenv()
 
         # Get environment variables
@@ -299,6 +318,7 @@ class RTSPManager(tk.Tk):
 
         # Filter cameras that belong to the selected farm
         cameras = [f"{link['channelID']}" for link in self.rtsp_links if link['farmID'] == selected_farm_id]
+        cameras = list(set(cameras))
 
         # Update the camera dropdown
         self.camera_dropdown['values'] = cameras
@@ -431,6 +451,8 @@ class RTSPManager(tk.Tk):
         if not self.video_capture[rtsp_link].isOpened():
             print(f"Failed to open RTSP stream: {rtsp_link}")
             return
+        
+        self.stop_flags[rtsp_link] = False
 
         if rtsp_link not in self.threads:
             self.threads[rtsp_link] = threading.Thread(target=self.record_stream, args=(rtsp_link,), daemon=True)
@@ -449,11 +471,11 @@ class RTSPManager(tk.Tk):
         if current_brightness < target_brightness - threshold:  # If frame is too dark
             factor = target_brightness / current_brightness
             frame = cv2.convertScaleAbs(frame, alpha=factor, beta=0)  # Brighten the image
-            print("brightness increased")
+            # print("brightness increased")
         elif current_brightness > target_brightness + threshold:  # If frame is too bright
             factor = target_brightness / current_brightness
             frame = cv2.convertScaleAbs(frame, alpha=factor, beta=0)  # Darken the image
-            print("brightness decreased")
+            # print("brightness decreased")
 
 
         return frame
@@ -488,11 +510,15 @@ class RTSPManager(tk.Tk):
         selected_link = next(link for link in self.rtsp_links if link['rtsp'] == rtsp_link)
         farm_id = selected_link['farmID']
         channel_id = selected_link['channelID']
-        camera_id = selected_link.get('cameraID', 'default_camera')  # Use 'default_camera' if cameraID is not available
+        pen_id = selected_link.get('penID', None)
+        if not pen_id:
+            output_dir = os.path.join('./recorded', farm_id, channel_id)
+        else: 
+            output_dir = os.path.join('./recorded', farm_id, pen_id, channel_id)
+            
+        os.makedirs(output_dir, exist_ok=True)  # Create the directories if they don't exist
 
         # Create folder structure: farmID/channelID
-        output_dir = os.path.join('./recorded', farm_id, channel_id)
-        os.makedirs(output_dir, exist_ok=True)  # Create the directories if they don't exist
 
         if rtsp_link not in self.video_writer:
             actual_fps = 30
@@ -502,7 +528,10 @@ class RTSPManager(tk.Tk):
             m3u8_path = os.path.join(output_dir, f'{channel_id}_output.m3u8')
 
             # FFmpeg command for HLS
-            base_url = f"ai/stream_pens/{farm_id}/{camera_id}/{channel_id[-1]}/"
+            if pen_id: 
+                base_url = f"ai/stream_pens/{farm_id}/{pen_id}/{channel_id[-1]}/"
+            else:
+                base_url = f"ai/stream_pens/{farm_id}/{channel_id[-1]}/"
 
             ffmpeg_command = [
                 'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo', '-pix_fmt', 'bgr24',
@@ -527,7 +556,7 @@ class RTSPManager(tk.Tk):
             weights = []  # To store the weight estimations
             height_part = None  # We'll set this later once the frame size is known
 
-            while self.recording.get(rtsp_link, False) and not self.stop_flag:
+            while self.recording.get(rtsp_link, False) and (not self.stop_flags[rtsp_link]):
                 ret, frame = self.video_capture[rtsp_link].read()
                 if not ret:
                     break
@@ -547,7 +576,7 @@ class RTSPManager(tk.Tk):
 
                 # Apply YOLOv8 processing on GPU
                 try:
-                    results = self.model(frame, verbose=False)  # YOLOv8 model processing (runs on GPU)
+                    results = self.model(frame, verbose=False, half = True)  # YOLOv8 model processing (runs on GPU)
                     num_boxes = len(results[0].boxes)
 
                     # Annotate frames with bounding boxes, object counts, and estimate weights
@@ -564,13 +593,13 @@ class RTSPManager(tk.Tk):
 
                             # Determine the distance factor based on the position in the frame
                             if y2 <= height_part:
-                                factor = 2
+                                factor = 1.5
                             elif y2 <= height_part * 2:
-                                factor = 1.7
-                            elif y2 <= height_part * 3:
                                 factor = 1.3
+                            elif y2 <= height_part * 3:
+                                factor = 1.2
                             else:
-                                factor = 1
+                                factor = 0.5
 
                             # Estimate the real size and weight of the chicken
                             distance_to_chicken = 2  # Assumed distance
@@ -620,17 +649,46 @@ class RTSPManager(tk.Tk):
     def stop_recording(self, rtsp_link):
         if rtsp_link in self.recording and self.recording[rtsp_link]:
             self.recording[rtsp_link] = False
-            print(f"Stopped recording for {rtsp_link}.")
+            self.stop_flags[rtsp_link] = True  # Set stop flag to True
+            print(f"Stopping recording for {rtsp_link}...")
+
+            # Wait for the thread to stop
+            if rtsp_link in self.threads and self.threads[rtsp_link].is_alive():
+                self.threads[rtsp_link].join()
+
+            # Stop the video capture
+            if rtsp_link in self.video_capture and self.video_capture[rtsp_link].isOpened():
+                self.video_capture[rtsp_link].release()
+                print(f"Released video capture for {rtsp_link}")
+
+            # Close the ffmpeg process
+            if rtsp_link in self.processes:
+                self.processes[rtsp_link].stdin.close()
+                self.processes[rtsp_link].terminate()
+                print(f"Terminated FFmpeg process for {rtsp_link}")
 
     def reset_farms(self):
+        # Stop all active streams
+        for rtsp_link in self.current_rtsp_links:
+            self.stop_video_stream(rtsp_link['rtsp'])
+        
+        # Clear all displayed videos
+        for rtsp_link in self.video_label:
+            self.clear_video_display(rtsp_link)
+        
+        # Reset current RTSP links
         self.current_rtsp_links = []
-        for rtsp in list(self.video_capture.keys()):
-            self.stop_video_stream(rtsp)
-        for rtsp in list(self.recording.keys()):
-            self.stop_recording(rtsp)
-        self.video_label.clear()
-        self.video_frame.destroy()
-        self.create_video_frame()  # Tạo lại khung videoe
+
+        for widget in self.video_frame.winfo_children():
+            widget.destroy()  # Remove each child widget from the video_frame
+        
+        # Reset dropdowns
+        self.selected_farm.set('')  # Clear the farm dropdown selection
+        self.camera_dropdown.set('')  # Clear the camera dropdown selection
+        self.camera_dropdown['values'] = []  # Empty camera dropdown
+
+        # Optionally reset threads or any other states
+        self.threads = {}
 
 if __name__ == "__main__":
 
